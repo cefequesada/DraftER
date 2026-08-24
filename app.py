@@ -1,4 +1,5 @@
 from __future__ import annotations
+from difflib import get_close_matches
 import re
 from io import StringIO
 from urllib.parse import quote
@@ -50,12 +51,71 @@ def init_state():
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
 
+def safe_int(value, default=0):
+    """Convert user/sheet values safely; blank editor rows arrive as NaN."""
+    if pd.isna(value):
+        return default
+    try:
+        return int(float(str(value).replace("$", "").replace(",", "").strip()))
+    except (TypeError, ValueError):
+        return default
+
 def budget_remaining():
-    return int(st.session_state.budget) - sum(int(x["price"]) for x in st.session_state.wins)
+    return safe_int(st.session_state.budget) - sum(safe_int(x.get("price")) for x in st.session_state.wins)
 
 def add_win(player, position_rank, price, source="manual"):
-    if not any(normalize(x["player"]) == normalize(player) for x in st.session_state.wins):
-        st.session_state.wins.append({"player": player, "position_rank": position_rank, "price": int(price), "source": source})
+    clean_player = "" if pd.isna(player) else str(player).strip()
+    clean_price = safe_int(price)
+    if not clean_player or clean_price < 1:
+        return False
+    if not any(normalize(x.get("player", "")) == normalize(clean_player) for x in st.session_state.wins):
+        st.session_state.wins.append({"player": clean_player, "position_rank": str(position_rank), "price": clean_price, "source": source})
+        return True
+    return False
+
+def find_player_in_message(message):
+    """Resolve a ranked player from a natural-language commissioner message."""
+    message_key = normalize(message)
+    exact_mentions = [name for name in rankings["player"] if normalize(name) in message_key]
+    if exact_mentions:
+        return max(exact_mentions, key=len)
+    words = re.sub(r"[^a-zA-Z0-9' -]", " ", message).split()
+    matches = get_close_matches(" ".join(words), rankings["player"].tolist(), n=1, cutoff=.72)
+    if matches:
+        return matches[0]
+    for size in (3, 2, 1):
+        for i in range(len(words) - size + 1):
+            candidate = " ".join(words[i:i + size])
+            matches = get_close_matches(candidate, rankings["player"].tolist(), n=1, cutoff=.86)
+            if matches:
+                return matches[0]
+    return None
+
+def recommendation_for(selected_name, current_bid):
+    row = rankings.loc[rankings["player"] == selected_name].iloc[0].to_dict()
+    owned_markers = []
+    for win in st.session_state.wins:
+        pos = base_position(win["position_rank"])
+        owned_markers.append(pos)
+        source = rankings[rankings["key"] == normalize(win["player"])]
+        if pos == "RB" and not source.empty and int(source.iloc[0]["position_rank"][2:]) <= 10:
+            owned_markers.append("TOP10_RB")
+    position_numbers = pd.to_numeric(
+        rankings["position_rank"].str.extract(r"(\d+)")[0], errors="coerce"
+    ).fillna(999)
+    eligible_top10 = rankings[
+        (rankings["base_position"] == "RB")
+        & position_numbers.le(10)
+        & ~rankings["key"].isin({normalize(x) for x in st.session_state.forbidden})
+        & ~rankings["key"].isin({normalize(x["player"]) for x in st.session_state.wins})
+    ]
+    rec = recommend(
+        row, current_bid, budget_remaining(), int(st.session_state.roster_size),
+        len(st.session_state.wins), owned_markers, set(st.session_state.forbidden),
+        st.session_state.setup_confirmed, int(st.session_state.minimum_bid),
+        len(eligible_top10),
+    )
+    return row, rec
 
 init_state()
 rankings = load_rankings()
@@ -92,9 +152,41 @@ m4.metric("Flexible dollars", f"${spendable}")
 
 tab_bid, tab_roster, tab_sheet, tab_values = st.tabs(["Live decision", "My roster", "Draft monitor", "Source values"])
 with tab_bid:
+    st.subheader("Commissioner console")
+    st.write("Ask in plain language during the auction. Include the current high bid when one exists.")
+    with st.form("commissioner_console", clear_on_submit=True):
+        commissioner_message = st.text_input(
+            "Live auction message",
+            placeholder="Trevor Lawrence is at $20. Should I bid?",
+        )
+        ask = st.form_submit_button("Get bid recommendation", type="primary", use_container_width=True)
+    if ask:
+        message_player = find_player_in_message(commissioner_message)
+        amounts = re.findall(r"\$\s*(\d+)|\b(\d+)\s*dollars?\b", commissioner_message, flags=re.I)
+        amount_values = [int(a or b) for a, b in amounts]
+        message_bid = amount_values[-1] if amount_values else 0
+        if not message_player:
+            st.error("I could not match that player to the source rankings. Check the spelling or use the player picker below.")
+        else:
+            message_row, message_rec = recommendation_for(message_player, message_bid)
+            st.markdown(f"### {message_rec.action}")
+            st.write(f"**{message_player}** · Source value **${int(message_row['value'])}** · Maximum **${message_rec.max_bid}**")
+            st.write(message_rec.reason)
+            if not amount_values:
+                st.caption("No current bid was included, so this treats the next legal bid as $1.")
+            if message_rec.next_bid is not None:
+                projected = remaining - message_rec.next_bid
+                st.write(f"If won at that bid: **${projected} remaining** with **{max(unfilled - 1, 0)} roster spots left**.")
+                if st.button(f"Record {message_player} won for ${message_rec.next_bid}", key="console_win"):
+                    add_win(message_player, message_row["position_rank"], message_rec.next_bid, "commissioner console")
+                    st.rerun()
+            if message_rec.provisional:
+                st.warning("PROVISIONAL — confirm roster size and minimum bid in League setup.")
+
+    st.divider()
+    st.subheader("Quick player picker")
     left, right = st.columns([1.1, .9])
     with left:
-        st.subheader("Nomination")
         selected_name = st.selectbox(
             "Player",
             rankings["player"].tolist(),
@@ -105,17 +197,8 @@ with tab_bid:
         current_bid = st.number_input("Current bid", min_value=0, max_value=200, value=0, step=1)
         row = None
         rec = None
-        owned_markers = []
-        for win in st.session_state.wins:
-            pos = base_position(win["position_rank"])
-            owned_markers.append(pos)
-            source = rankings[rankings["key"] == normalize(win["player"])]
-            if pos == "RB" and not source.empty and int(source.iloc[0]["position_rank"][2:]) <= 10:
-                owned_markers.append("TOP10_RB")
         if selected_name:
-            row = rankings.loc[rankings["player"] == selected_name].iloc[0].to_dict()
-            eligible_top10 = rankings[(rankings["base_position"] == "RB") & rankings["position_rank"].str.extract(r"(\\d+)")[0].astype(int).le(10) & ~rankings["key"].isin({normalize(x) for x in st.session_state.forbidden}) & ~rankings["key"].isin({normalize(x["player"]) for x in st.session_state.wins})]
-            rec = recommend(row, current_bid, remaining, int(st.session_state.roster_size), owned_count, owned_markers, set(st.session_state.forbidden), st.session_state.setup_confirmed, int(st.session_state.minimum_bid), len(eligible_top10))
+            row, rec = recommendation_for(selected_name, current_bid)
     with right:
         st.subheader("Call")
         if rec is None:
@@ -137,7 +220,17 @@ with tab_roster:
     if st.session_state.wins:
         edited = st.data_editor(pd.DataFrame(st.session_state.wins), hide_index=True, use_container_width=True, num_rows="dynamic", column_config={"price": st.column_config.NumberColumn(min_value=1, step=1, format="$%d")}, key="roster_editor")
         if st.button("Apply roster edits"):
-            st.session_state.wins = edited.to_dict("records")
+            cleaned = []
+            for item in edited.to_dict("records"):
+                player = "" if pd.isna(item.get("player")) else str(item.get("player", "")).strip()
+                price = safe_int(item.get("price"))
+                if player and price >= 1:
+                    item["player"] = player
+                    item["price"] = price
+                    item["position_rank"] = "" if pd.isna(item.get("position_rank")) else str(item.get("position_rank", ""))
+                    item["source"] = "manual" if pd.isna(item.get("source")) else str(item.get("source", "manual"))
+                    cleaned.append(item)
+            st.session_state.wins = cleaned
             st.rerun()
     else:
         st.info("No purchases recorded yet.")
@@ -178,7 +271,7 @@ with tab_sheet:
                         source = rankings[rankings["key"] == normalize(item[player_col])]
                         if source.empty:
                             continue
-                        price = int(float(re.sub(r"[^0-9.]", "", str(item[price_col])) or 0))
+                        price = safe_int(item[price_col])
                         if price > 0:
                             add_win(source.iloc[0]["player"], source.iloc[0]["position_rank"], price, "Google Sheet")
                             count += 1

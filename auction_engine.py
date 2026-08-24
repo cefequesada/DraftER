@@ -12,7 +12,7 @@ TARGET_QBS = {"Trevor Lawrence", "Caleb Williams", "Kyler Murray"}
 
 
 def base_position(position_rank: str) -> str:
-    return re.sub(r"\\d+$", "", str(position_rank))
+    return re.sub(r"\d+$", "", str(position_rank))
 
 
 def normalize(name: str) -> str:
@@ -83,4 +83,3 @@ def recommend(
     if budget_cap < source_value:
         reason += f" after protecting a ${reserve_after_win(roster_size, players_owned, minimum_bid)} endgame reserve"
     return Recommendation(f"STOP AT ${max_bid}" if current_bid <= max_bid else "PASS", max_bid, reason + ".", provisional=provisional)
-

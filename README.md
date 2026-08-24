@@ -33,6 +33,7 @@ Share the spreadsheet with the service-account `client_email`.
 
 ## Draft workflow
 
+- Use the **Commissioner console** for natural-language questions such as “Trevor Lawrence is at $20. Should I bid?” It resolves the player, returns only the next legal $1 bid, shows the maximum, and calculates the budget impact.
 - Confirm the roster template in **League setup** before relying on full-budget optimization.
 - Search and select a nominated player, then enter the current bid. The recommendation always returns only the next legal $1 bid.
 - Record wins from the recommendation card or manually in **My roster**.
