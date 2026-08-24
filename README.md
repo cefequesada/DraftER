@@ -38,6 +38,7 @@ Share the spreadsheet with the service-account `client_email`.
 - Search and select a nominated player, then enter the current bid. The recommendation always returns only the next legal $1 bid.
 - Record wins from the recommendation card or manually in **My roster**.
 - The app refreshes the configured Google Sheets tab and can import your roster when you map its player, price, and fantasy-team columns.
+- In **Draft Monitor**, confirm the player column once. **Best Available** then removes drafted and avoided players, shows the best overall and by position, and highlights target QBs, eligible top-10 RBs, and the strongest roster fit.
 - Edit the sheet URL, tab name, and do-not-draft list in the sidebar.
 
 The bundled values were extracted from the uploaded PDF's dedicated SuperFlex section (updated August 3, 2026). The app does not fetch or invent outside rankings.
