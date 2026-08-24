@@ -1,5 +1,5 @@
 from __future__ import annotations
-from difflib import get_close_matches
+from difflib import SequenceMatcher
 import re
 from io import StringIO
 from urllib.parse import quote
@@ -73,23 +73,55 @@ def add_win(player, position_rank, price, source="manual"):
         return True
     return False
 
+def without_suffix(name):
+    return re.sub(r"(?:jr|sr|ii|iii|iv)$", "", normalize(name))
+
+def match_player_name(text, sentence=False, cutoff=.72):
+    """Fuzzy-match a name and return (authoritative name, confidence)."""
+    if pd.isna(text) or not str(text).strip():
+        return None, 0.0
+    text_key = normalize(text)
+    rows = rankings[["player", "key"]].copy()
+
+    exact = rows[rows["key"] == text_key]
+    if not exact.empty:
+        return exact.iloc[0]["player"], 1.0
+    suffix_key = without_suffix(text)
+    suffix_matches = rows[rows["player"].map(without_suffix) == suffix_key]
+    if len(suffix_matches) == 1:
+        return suffix_matches.iloc[0]["player"], .99
+
+    mentions = rows[rows["key"].map(lambda key: len(key) >= 5 and key in text_key)]
+    if not mentions.empty:
+        winner = mentions.sort_values("key", key=lambda col: col.str.len(), ascending=False).iloc[0]
+        return winner["player"], .98
+
+    words = re.sub(r"[^a-zA-Z0-9' -]", " ", str(text)).split()
+    candidates = [str(text)]
+    max_words = 4 if sentence else min(4, len(words))
+    for size in range(max_words, 0, -1):
+        candidates.extend(" ".join(words[i:i + size]) for i in range(len(words) - size + 1))
+
+    best_name, best_score = None, 0.0
+    for _, item in rows.iterrows():
+        player_keys = {item["key"], without_suffix(item["player"])}
+        for candidate in candidates:
+            candidate_key = normalize(candidate)
+            if not candidate_key:
+                continue
+            score = max(SequenceMatcher(None, candidate_key, key).ratio() for key in player_keys)
+            if score > best_score:
+                best_name, best_score = item["player"], score
+
+    # A unique last name is safe even when the first name is omitted.
+    if len(words) == 1 and len(words[0]) >= 4:
+        last_matches = rows[rows["player"].str.split().str[-1].map(normalize) == normalize(words[0])]
+        if len(last_matches) == 1:
+            return last_matches.iloc[0]["player"], .95
+    return (best_name, best_score) if best_score >= cutoff else (None, best_score)
+
 def find_player_in_message(message):
-    """Resolve a ranked player from a natural-language commissioner message."""
-    message_key = normalize(message)
-    exact_mentions = [name for name in rankings["player"] if normalize(name) in message_key]
-    if exact_mentions:
-        return max(exact_mentions, key=len)
-    words = re.sub(r"[^a-zA-Z0-9' -]", " ", message).split()
-    matches = get_close_matches(" ".join(words), rankings["player"].tolist(), n=1, cutoff=.72)
-    if matches:
-        return matches[0]
-    for size in (3, 2, 1):
-        for i in range(len(words) - size + 1):
-            candidate = " ".join(words[i:i + size])
-            matches = get_close_matches(candidate, rankings["player"].tolist(), n=1, cutoff=.86)
-            if matches:
-                return matches[0]
-    return None
+    return match_player_name(message, sentence=True, cutoff=.70)
 
 def recommendation_for(selected_name, current_bid):
     row = rankings.loc[rankings["player"] == selected_name].iloc[0].to_dict()
@@ -119,18 +151,8 @@ def recommendation_for(selected_name, current_bid):
 
 def recognized_player(value):
     """Return the authoritative player name represented by a sheet cell."""
-    if pd.isna(value):
-        return None
-    cell_key = normalize(value)
-    if not cell_key:
-        return None
-    exact = rankings[rankings["key"] == cell_key]
-    if not exact.empty:
-        return exact.iloc[0]["player"]
-    contained = rankings[rankings["key"].map(lambda key: len(key) >= 5 and key in cell_key)]
-    if not contained.empty:
-        return contained.sort_values("key", key=lambda col: col.str.len(), ascending=False).iloc[0]["player"]
-    return None
+    match, confidence = match_player_name(value, sentence=False, cutoff=.78)
+    return match if confidence >= .78 else None
 
 def detect_player_column(frame):
     """Pick the sheet column containing the most recognized ranked players."""
@@ -138,9 +160,18 @@ def detect_player_column(frame):
         return None
     scores = {}
     for column in frame.columns:
-        scores[column] = frame[column].head(300).map(recognized_player).notna().sum()
+        scores[column] = frame[column].head(80).map(recognized_player).notna().sum()
     best = max(scores, key=scores.get) if scores else None
     return best if best is not None and scores[best] > 0 else None
+
+def all_drafted_players(frame):
+    """Recognize drafted players anywhere on a row-style or owner-column draft board."""
+    if frame.empty:
+        return set()
+    found = set()
+    for column in frame.columns:
+        found.update(name for name in frame[column].map(recognized_player) if name)
+    return found
 
 init_state()
 rankings = load_rankings()
@@ -186,7 +217,7 @@ with tab_bid:
         )
         ask = st.form_submit_button("Get bid recommendation", type="primary", use_container_width=True)
     if ask:
-        message_player = find_player_in_message(commissioner_message)
+        message_player, match_confidence = find_player_in_message(commissioner_message)
         amounts = re.findall(r"\$\s*(\d+)|\b(\d+)\s*dollars?\b", commissioner_message, flags=re.I)
         amount_values = [int(a or b) for a, b in amounts]
         message_bid = amount_values[-1] if amount_values else 0
@@ -194,14 +225,16 @@ with tab_bid:
             st.error("I could not match that player to the source rankings. Check the spelling or use the player picker below.")
         else:
             message_row, message_rec = recommendation_for(message_player, message_bid)
+            if match_confidence < .98:
+                st.info(f"Matched your entry to **{message_player}** ({match_confidence:.0%} confidence).")
             st.markdown(f"### {message_rec.action}")
-            st.write(f"**{message_player}** · Source value **${int(message_row['value'])}** · Maximum **${message_rec.max_bid}**")
+            st.write(f"**{message_player}** · Source value **\\${int(message_row['value'])}** · Maximum **\\${message_rec.max_bid}**")
             st.write(message_rec.reason)
             if not amount_values:
                 st.caption("No current bid was included, so this treats the next legal bid as $1.")
             if message_rec.next_bid is not None:
                 projected = remaining - message_rec.next_bid
-                st.write(f"If won at that bid: **${projected} remaining** with **{max(unfilled - 1, 0)} roster spots left**.")
+                st.write(f"If won at that bid: **\\${projected} remaining** with **{max(unfilled - 1, 0)} roster spots left**.")
                 if st.button(f"Record {message_player} won for ${message_rec.next_bid}", key="console_win"):
                     add_win(message_player, message_row["position_rank"], message_rec.next_bid, "commissioner console")
                     st.rerun()
@@ -212,13 +245,17 @@ with tab_bid:
     st.subheader("Quick player picker")
     left, right = st.columns([1.1, .9])
     with left:
-        selected_name = st.selectbox(
-            "Player",
-            rankings["player"].tolist(),
-            index=None,
-            placeholder="Type a player name...",
-            help="Start typing to search the 200 players in the authoritative source.",
+        quick_entry = st.text_input(
+            "Player name",
+            placeholder="Trevor Lawerence",
+            help="Exact spelling is not required. The matched source player appears below.",
+            key="quick_player_entry",
         )
+        selected_name, quick_confidence = match_player_name(quick_entry, cutoff=.70)
+        if quick_entry and selected_name:
+            st.caption(f"Matched to **{selected_name}** · {quick_confidence:.0%} confidence")
+        elif quick_entry:
+            st.warning("No confident source match. Try adding the player's first or last name.")
         current_bid = st.number_input("Current bid", min_value=0, max_value=200, value=0, step=1)
         row = None
         rec = None
@@ -232,8 +269,8 @@ with tab_bid:
             color = "#27AE60" if rec.action.startswith("BID") else "#E67E22" if rec.action.startswith("STOP") else "#C0392B"
             st.markdown(f'<div style="padding:22px;border-radius:14px;background:{color};color:white"><div style="font-size:2.1rem;font-weight:800">{rec.action}</div><div style="margin-top:8px">{rec.reason}</div></div>', unsafe_allow_html=True)
         if row and rec:
-            st.write(f"**Source:** #{int(row['rank'])} overall · {row['position_rank']} · ${int(row['value'])}")
-            st.write(f"**Ceiling:** ${rec.max_bid}" + (" (source + $3 target allowance)" if selected_name in TARGET_QBS else " (never above source)"))
+            st.write(f"**Source:** #{int(row['rank'])} overall · {row['position_rank']} · \\${int(row['value'])}")
+            st.write(f"**Ceiling:** \\${rec.max_bid}" + (" (source + \\$3 target allowance)" if selected_name in TARGET_QBS else " (never above source)"))
         if rec and rec.provisional:
             st.warning("PROVISIONAL — confirm roster size and minimum bid.")
         if selected_name and rec and rec.next_bid is not None and st.button(f"Record win at ${rec.next_bid}", type="primary", use_container_width=True):
@@ -261,11 +298,14 @@ with tab_roster:
         st.info("No purchases recorded yet.")
     with st.expander("Add a purchase manually"):
         manual_name = st.text_input("Player name", key="manual_player")
-        found = rankings[rankings["key"] == normalize(manual_name)] if manual_name else rankings.iloc[0:0]
+        manual_match, manual_confidence = match_player_name(manual_name, cutoff=.70)
+        found = rankings[rankings["player"] == manual_match] if manual_match else rankings.iloc[0:0]
+        if manual_name and manual_match:
+            st.caption(f"Matched to **{manual_match}** · {manual_confidence:.0%} confidence")
         manual_pos = found.iloc[0]["position_rank"] if not found.empty else st.selectbox("Position", ["QB", "RB", "WR", "TE", "K", "DST"])
         manual_price = st.number_input("Price paid", 1, 200, 1)
         if st.button("Add purchase"):
-            add_win(manual_name, str(manual_pos), manual_price)
+            add_win(manual_match or manual_name, str(manual_pos), manual_price)
             st.rerun()
     qbs = sum(base_position(x["position_rank"]) == "QB" for x in st.session_state.wins)
     top_rb = False
@@ -273,8 +313,14 @@ with tab_roster:
         source = rankings[rankings["key"] == normalize(x["player"])]
         top_rb |= bool(not source.empty and source.iloc[0]["base_position"] == "RB" and int(source.iloc[0]["position_rank"][2:]) <= 10)
     g1, g2 = st.columns(2)
-    g1.success(f"Strong QB goal: {qbs}/2") if qbs >= 2 else g1.warning(f"Strong QB goal: {qbs}/2")
-    g2.success("Top-10 RB secured") if top_rb else g2.warning("Top-10 eligible RB still needed")
+    if qbs >= 2:
+        g1.success(f"Strong QB goal: {qbs}/2")
+    else:
+        g1.warning(f"Strong QB goal: {qbs}/2")
+    if top_rb:
+        g2.success("Top-10 RB secured")
+    else:
+        g2.warning("Top-10 eligible RB still needed")
 
 sheet_df = pd.DataFrame()
 sheet_error = None
@@ -290,13 +336,14 @@ with tab_sheet:
             default_col = saved_col if saved_col in sheet_df.columns else detected_col
             default_index = list(sheet_df.columns).index(default_col) if default_col in sheet_df.columns else 0
             st.session_state.sheet_player_col = st.selectbox(
-                "Player column used to track drafted players",
+                "My roster/owner column",
                 list(sheet_df.columns),
                 index=default_index,
-                help="Every recognized player in this column is removed from Best Available.",
+                help="Choose your team column for roster importing. Best Available scans the entire draft board.",
             )
-            recognized_count = sheet_df[st.session_state.sheet_player_col].map(recognized_player).notna().sum()
-            st.caption(f"{recognized_count} drafted players recognized for availability tracking.")
+            board_count = len(all_drafted_players(sheet_df))
+            my_count = sheet_df[st.session_state.sheet_player_col].map(recognized_player).notna().sum()
+            st.caption(f"{board_count} drafted players recognized across the board · {my_count} in the selected roster column.")
             with st.expander("Import my purchases from this tab"):
                 cols = ["—"] + list(sheet_df.columns)
                 player_col = st.selectbox("Player column", cols)
@@ -323,10 +370,8 @@ with tab_sheet:
 
 with tab_best:
     st.subheader("Best available players")
-    drafted_names = set()
+    drafted_names = all_drafted_players(sheet_df)
     player_col = st.session_state.sheet_player_col
-    if not sheet_df.empty and player_col in sheet_df.columns:
-        drafted_names = {name for name in sheet_df[player_col].map(recognized_player) if name}
     drafted_names.update(x.get("player", "") for x in st.session_state.wins)
     unavailable_keys = {normalize(x) for x in drafted_names}
     avoid_keys = {normalize(x) for x in st.session_state.forbidden}
@@ -343,10 +388,8 @@ with tab_best:
         st.warning("The live sheet is unavailable, so availability currently uses only purchases recorded in My roster.")
     elif sheet_df.empty:
         st.warning("No live draft rows were loaded. Availability currently uses only purchases recorded in My roster.")
-    elif not player_col:
-        st.warning("Choose the player column in Draft Monitor to remove drafted players automatically.")
     else:
-        st.caption(f"Using **{player_col}** from **{st.session_state.sheet_tab}** · {len(drafted_names)} drafted players removed")
+        st.caption(f"Scanning all columns in **{st.session_state.sheet_tab}** · {len(drafted_names)} drafted players removed")
 
     if available.empty:
         st.error("No available ranked players remain after applying the draft sheet and avoid list.")
@@ -373,7 +416,7 @@ with tab_best:
         with c1:
             st.markdown("#### Best overall")
             st.metric(best_overall["player"], f"${int(best_overall['value'])} source value", f"#{int(best_overall['rank'])} overall")
-            st.caption(f"{best_overall['position_rank']} · Maximum ${int(best_overall['max_bid'])}")
+            st.caption(f"{best_overall['position_rank']} · Maximum \\${int(best_overall['max_bid'])}")
         with c2:
             st.markdown("#### Best roster fit")
             st.metric(roster_fit["player"], f"${int(roster_fit['max_bid'])} maximum", f"#{int(roster_fit['rank'])} overall")
@@ -393,10 +436,16 @@ with tab_best:
         d1, d2 = st.columns(2)
         with d1:
             st.markdown("#### Remaining target QBs")
-            st.dataframe(target_view, hide_index=True, use_container_width=True) if not target_view.empty else st.success("All target QBs are drafted or unavailable.")
+            if not target_view.empty:
+                st.dataframe(target_view, hide_index=True, use_container_width=True)
+            else:
+                st.success("All target QBs are drafted or unavailable.")
         with d2:
             st.markdown("#### Eligible top-10 RBs")
-            st.dataframe(top_rb_view, hide_index=True, use_container_width=True) if not top_rb_view.empty else st.warning("No eligible top-10 RB remains in the source pool.")
+            if not top_rb_view.empty:
+                st.dataframe(top_rb_view, hide_index=True, use_container_width=True)
+            else:
+                st.warning("No eligible top-10 RB remains in the source pool.")
 
 with tab_values:
     st.subheader("Authoritative source values")
