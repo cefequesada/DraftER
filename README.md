@@ -34,11 +34,9 @@ Share the spreadsheet with the service-account `client_email`.
 ## Draft workflow
 
 - Confirm the roster template in **League setup** before relying on full-budget optimization.
-- Enter a nominated player and current bid. The recommendation always returns only the next legal $1 bid.
+- Search and select a nominated player, then enter the current bid. The recommendation always returns only the next legal $1 bid.
 - Record wins from the recommendation card or manually in **My roster**.
 - The app refreshes the configured Google Sheets tab and can import your roster when you map its player, price, and fantasy-team columns.
 - Edit the sheet URL, tab name, and do-not-draft list in the sidebar.
 
 The bundled values were extracted from the uploaded PDF's dedicated SuperFlex section (updated August 3, 2026). The app does not fetch or invent outside rankings.
-
-# DraftER

@@ -95,12 +95,16 @@ with tab_bid:
     left, right = st.columns([1.1, .9])
     with left:
         st.subheader("Nomination")
-        query = st.text_input("Player", placeholder="Trevor Lawrence")
-        matches = rankings[rankings["player"].str.contains(query, case=False, regex=False)] if query else rankings.iloc[0:0]
-        choices = matches["player"].tolist()
-        selected_name = st.selectbox("Source match", choices, index=0) if choices else None
+        selected_name = st.selectbox(
+            "Player",
+            rankings["player"].tolist(),
+            index=None,
+            placeholder="Type a player name...",
+            help="Start typing to search the 200 players in the authoritative source.",
+        )
         current_bid = st.number_input("Current bid", min_value=0, max_value=200, value=0, step=1)
         row = None
+        rec = None
         owned_markers = []
         for win in st.session_state.wins:
             pos = base_position(win["position_rank"])
@@ -112,18 +116,19 @@ with tab_bid:
             row = rankings.loc[rankings["player"] == selected_name].iloc[0].to_dict()
             eligible_top10 = rankings[(rankings["base_position"] == "RB") & rankings["position_rank"].str.extract(r"(\\d+)")[0].astype(int).le(10) & ~rankings["key"].isin({normalize(x) for x in st.session_state.forbidden}) & ~rankings["key"].isin({normalize(x["player"]) for x in st.session_state.wins})]
             rec = recommend(row, current_bid, remaining, int(st.session_state.roster_size), owned_count, owned_markers, set(st.session_state.forbidden), st.session_state.setup_confirmed, int(st.session_state.minimum_bid), len(eligible_top10))
-        else:
-            rec = recommend(None, current_bid, remaining, int(st.session_state.roster_size), owned_count, owned_markers, set(st.session_state.forbidden), st.session_state.setup_confirmed, int(st.session_state.minimum_bid))
     with right:
         st.subheader("Call")
-        color = "#27AE60" if rec.action.startswith("BID") else "#E67E22" if rec.action.startswith("STOP") else "#C0392B"
-        st.markdown(f'<div style="padding:22px;border-radius:14px;background:{color};color:white"><div style="font-size:2.1rem;font-weight:800">{rec.action}</div><div style="margin-top:8px">{rec.reason}</div></div>', unsafe_allow_html=True)
-        if row:
+        if rec is None:
+            st.info("Select a player to get the next legal bid and maximum price.")
+        else:
+            color = "#27AE60" if rec.action.startswith("BID") else "#E67E22" if rec.action.startswith("STOP") else "#C0392B"
+            st.markdown(f'<div style="padding:22px;border-radius:14px;background:{color};color:white"><div style="font-size:2.1rem;font-weight:800">{rec.action}</div><div style="margin-top:8px">{rec.reason}</div></div>', unsafe_allow_html=True)
+        if row and rec:
             st.write(f"**Source:** #{int(row['rank'])} overall · {row['position_rank']} · ${int(row['value'])}")
             st.write(f"**Ceiling:** ${rec.max_bid}" + (" (source + $3 target allowance)" if selected_name in TARGET_QBS else " (never above source)"))
-        if rec.provisional:
+        if rec and rec.provisional:
             st.warning("PROVISIONAL — confirm roster size and minimum bid.")
-        if selected_name and rec.next_bid is not None and st.button(f"Record win at ${rec.next_bid}", type="primary", use_container_width=True):
+        if selected_name and rec and rec.next_bid is not None and st.button(f"Record win at ${rec.next_bid}", type="primary", use_container_width=True):
             add_win(selected_name, row["position_rank"], rec.next_bid)
             st.rerun()
 
@@ -189,4 +194,3 @@ with tab_values:
     view = rankings[["rank", "player", "team", "position_rank", "value"]].copy()
     view["status"] = view["player"].map(lambda x: "AVOID" if normalize(x) in {normalize(y) for y in st.session_state.forbidden} else "TARGET +$3" if x in TARGET_QBS else "")
     st.dataframe(view, hide_index=True, use_container_width=True, height=520, column_config={"value": st.column_config.NumberColumn("Value", format="$%d")})
-
