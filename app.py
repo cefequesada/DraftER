@@ -152,9 +152,21 @@ def recommendation_for(selected_name, current_bid):
     return row, rec
 
 def recognized_player(value):
-    """Return the authoritative player name represented by a sheet cell."""
-    match, confidence = match_player_name(value, sentence=False, cutoff=.78)
-    return match if confidence >= .78 else None
+    """Fast spreadsheet matcher: exact, suffix-insensitive, or embedded name."""
+    if pd.isna(value):
+        return None
+    cell_key = normalize(value)
+    if not cell_key:
+        return None
+    if cell_key in PLAYER_KEY_MAP:
+        return PLAYER_KEY_MAP[cell_key]
+    suffix_key = without_suffix(value)
+    if suffix_key in PLAYER_SUFFIX_MAP:
+        return PLAYER_SUFFIX_MAP[suffix_key]
+    for player_key in PLAYER_KEYS_BY_LENGTH:
+        if player_key in cell_key:
+            return PLAYER_KEY_MAP[player_key]
+    return None
 
 def detect_player_column(frame):
     """Pick the sheet column containing the most recognized ranked players."""
@@ -166,17 +178,26 @@ def detect_player_column(frame):
     best = max(scores, key=scores.get) if scores else None
     return best if best is not None and scores[best] > 0 else None
 
+@st.cache_data(show_spinner=False)
 def all_drafted_players(frame):
     """Recognize drafted players anywhere on a row-style or owner-column draft board."""
     if frame.empty:
         return set()
     found = set()
-    for column in frame.columns:
-        found.update(name for name in frame[column].map(recognized_player) if name)
+    nonempty = frame.dropna(axis=1, how="all")
+    for column in nonempty.columns:
+        values = nonempty[column].dropna().astype(str)
+        found.update(name for name in values.map(recognized_player) if name)
     return found
 
 init_state()
 rankings = load_rankings()
+PLAYER_KEY_MAP = dict(zip(rankings["key"], rankings["player"]))
+suffix_groups = {}
+for player_name in rankings["player"]:
+    suffix_groups.setdefault(without_suffix(player_name), []).append(player_name)
+PLAYER_SUFFIX_MAP = {key: names[0] for key, names in suffix_groups.items() if len(names) == 1}
+PLAYER_KEYS_BY_LENGTH = sorted(PLAYER_KEY_MAP, key=len, reverse=True)
 st.title("SuperFlex Auction Proxy")
 st.caption("12 teams · Half-PPR · $200 budget · Ringer 2026 SuperFlex values · $1 bid increments")
 
