@@ -34,11 +34,12 @@ Share the spreadsheet with the service-account `client_email`.
 ## Draft workflow
 
 - Use the **Commissioner console** for natural-language questions such as “Trevor Lawrence is at $20. Should I bid?” It supports close spellings and omitted suffixes, resolves the player, returns only the next legal $1 bid, shows the maximum, and calculates the budget impact.
+- Availability questions are checked against every recognized player on the active draft sheet before any bid is recommended. Drafted players return **UNAVAILABLE**.
 - Confirm the roster template in **League setup** before relying on full-budget optimization.
 - Search and select a nominated player, then enter the current bid. The recommendation always returns only the next legal $1 bid.
 - Record wins from the recommendation card or manually in **My roster**.
 - The app refreshes the configured Google Sheets tab and can import your roster when you map its player, price, and fantasy-team columns.
 - In **Draft Monitor**, confirm the player column once. **Best Available** then removes drafted and avoided players, shows the best overall and by position, and highlights target QBs, eligible top-10 RBs, and the strongest roster fit.
-- Edit the sheet URL, tab name, and do-not-draft list in the sidebar.
+- Edit the sheet URL or tab name in the sidebar and click **Apply draft source**. This clears the prior sheet cache and reloads the new tab immediately.
 
 The bundled values were extracted from the uploaded PDF's dedicated SuperFlex section (updated August 3, 2026). The app does not fetch or invent outside rankings.

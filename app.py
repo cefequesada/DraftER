@@ -50,6 +50,8 @@ def init_state():
     defaults = {"wins": [], "budget": 200, "roster_size": 16, "minimum_bid": 1, "setup_confirmed": False, "forbidden": sorted(FORBIDDEN_DEFAULT), "sheet_url": SHEET_DEFAULT, "sheet_tab": TAB_DEFAULT, "sheet_player_col": None}
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
+    st.session_state.setdefault("sheet_url_input", st.session_state.sheet_url)
+    st.session_state.setdefault("sheet_tab_input", st.session_state.sheet_tab)
 
 def safe_int(value, default=0):
     """Convert user/sheet values safely; blank editor rows arrive as NaN."""
@@ -180,8 +182,25 @@ st.caption("12 teams · Half-PPR · $200 budget · Ringer 2026 SuperFlex values 
 
 with st.sidebar:
     st.header("Live draft source")
-    st.session_state.sheet_url = st.text_input("Google Sheet URL", st.session_state.sheet_url)
-    st.session_state.sheet_tab = st.text_input("Tab name", st.session_state.sheet_tab)
+    with st.form("draft_source_form"):
+        source_url = st.text_input("Google Sheet URL", key="sheet_url_input")
+        source_tab = st.text_input("Tab name", key="sheet_tab_input")
+        apply_source = st.form_submit_button("Apply draft source", type="primary", use_container_width=True)
+    if apply_source:
+        clean_url = source_url.strip()
+        clean_tab = source_tab.strip()
+        if not sheet_id(clean_url):
+            st.error("Enter a valid Google Sheets URL.")
+        elif not clean_tab:
+            st.error("Enter the exact tab name.")
+        else:
+            st.session_state.sheet_url = clean_url
+            st.session_state.sheet_tab = clean_tab
+            st.session_state.sheet_player_col = None
+            load_sheet.clear()
+            st.success(f"Draft source changed to: {clean_tab}")
+            st.rerun()
+    st.caption(f"Active tab: **{st.session_state.sheet_tab}**")
     refresh_seconds = st.slider("Refresh every", 10, 120, 20, 5, format="%d sec")
     if st.toggle("Auto-refresh", True):
         st_autorefresh(interval=refresh_seconds * 1000, key="sheet_refresh")
@@ -206,6 +225,17 @@ m2.metric("Roster spots left", unfilled)
 m3.metric("Protected reserve", f"${reserve}")
 m4.metric("Flexible dollars", f"${spendable}")
 
+sheet_df = pd.DataFrame()
+sheet_error = None
+try:
+    sheet_df = load_sheet(st.session_state.sheet_url, st.session_state.sheet_tab)
+except Exception as exc:
+    sheet_error = exc
+board_drafted_names = all_drafted_players(sheet_df)
+owned_names = {str(x.get("player", "")) for x in st.session_state.wins if x.get("player")}
+known_drafted_names = board_drafted_names | owned_names
+known_drafted_keys = {normalize(name) for name in known_drafted_names}
+
 tab_bid, tab_roster, tab_sheet, tab_best, tab_values = st.tabs(["Live decision", "My roster", "Draft monitor", "Best available", "Source values"])
 with tab_bid:
     st.subheader("Commissioner console")
@@ -223,6 +253,12 @@ with tab_bid:
         message_bid = amount_values[-1] if amount_values else 0
         if not message_player:
             st.error("I could not match that player to the source rankings. Check the spelling or use the player picker below.")
+        elif normalize(message_player) in known_drafted_keys:
+            st.error(f"UNAVAILABLE — **{message_player}** is already drafted.")
+            if message_player in board_drafted_names:
+                st.write(f"The player appears on the **{st.session_state.sheet_tab}** draft sheet.")
+            else:
+                st.write("The player is already recorded on your roster.")
         else:
             message_row, message_rec = recommendation_for(message_player, message_bid)
             if match_confidence < .98:
@@ -259,11 +295,15 @@ with tab_bid:
         current_bid = st.number_input("Current bid", min_value=0, max_value=200, value=0, step=1)
         row = None
         rec = None
-        if selected_name:
+        selected_unavailable = bool(selected_name and normalize(selected_name) in known_drafted_keys)
+        if selected_name and not selected_unavailable:
             row, rec = recommendation_for(selected_name, current_bid)
     with right:
         st.subheader("Call")
-        if rec is None:
+        if selected_unavailable:
+            st.error(f"UNAVAILABLE — {selected_name} is already drafted.")
+            st.caption(f"Found on the {st.session_state.sheet_tab} sheet or your recorded roster.")
+        elif rec is None:
             st.info("Select a player to get the next legal bid and maximum price.")
         else:
             color = "#27AE60" if rec.action.startswith("BID") else "#E67E22" if rec.action.startswith("STOP") else "#C0392B"
@@ -322,12 +362,9 @@ with tab_roster:
     else:
         g2.warning("Top-10 eligible RB still needed")
 
-sheet_df = pd.DataFrame()
-sheet_error = None
 with tab_sheet:
     st.subheader(f"Google Sheet · {st.session_state.sheet_tab}")
-    try:
-        sheet_df = load_sheet(st.session_state.sheet_url, st.session_state.sheet_tab)
+    if sheet_error is None:
         st.success(f"Live feed connected · {len(sheet_df)} rows")
         st.dataframe(sheet_df, use_container_width=True, hide_index=True, height=420)
         if len(sheet_df.columns):
@@ -363,14 +400,13 @@ with tab_sheet:
                             count += 1
                     st.success(f"Imported {count} recognized purchases.")
                     st.rerun()
-    except Exception as exc:
-        sheet_error = exc
-        st.error(f"Live feed unavailable: {exc}")
+    else:
+        st.error(f"Live feed unavailable: {sheet_error}")
         st.info("For a private sheet, configure a read-only Google service account as described in README.md.")
 
 with tab_best:
     st.subheader("Best available players")
-    drafted_names = all_drafted_players(sheet_df)
+    drafted_names = set(board_drafted_names)
     player_col = st.session_state.sheet_player_col
     drafted_names.update(x.get("player", "") for x in st.session_state.wins)
     unavailable_keys = {normalize(x) for x in drafted_names}
