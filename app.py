@@ -47,7 +47,7 @@ def load_sheet(url, tab):
     return pd.read_csv(StringIO(response.text))
 
 def init_state():
-    defaults = {"wins": [], "budget": 200, "roster_size": 16, "minimum_bid": 1, "setup_confirmed": False, "forbidden": sorted(FORBIDDEN_DEFAULT), "sheet_url": SHEET_DEFAULT, "sheet_tab": TAB_DEFAULT, "sheet_player_col": None}
+    defaults = {"wins": [], "budget": 200, "roster_size": 16, "minimum_bid": 1, "setup_confirmed": False, "forbidden": sorted(FORBIDDEN_DEFAULT), "sheet_url": SHEET_DEFAULT, "sheet_tab": TAB_DEFAULT, "sheet_player_col": None, "drafted_columns": [], "drafted_columns_initialized": False}
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
     st.session_state.setdefault("sheet_url_input", st.session_state.sheet_url)
@@ -178,13 +178,30 @@ def detect_player_column(frame):
     best = max(scores, key=scores.get) if scores else None
     return best if best is not None and scores[best] > 0 else None
 
+def player_counts_by_column(frame):
+    if frame.empty:
+        return {}
+    counts = {}
+    for column in frame.dropna(axis=1, how="all").columns:
+        counts[column] = int(frame[column].dropna().astype(str).map(recognized_player).notna().sum())
+    return counts
+
+def suggested_drafted_columns(frame, roster_size):
+    """Select owner/roster columns while excluding long rankings lists."""
+    counts = player_counts_by_column(frame)
+    upper_bound = max(int(roster_size) + 2, 6)
+    return [column for column, count in counts.items() if 0 < count <= upper_bound]
+
 @st.cache_data(show_spinner=False)
-def all_drafted_players(frame):
+def all_drafted_players(frame, columns):
     """Recognize drafted players anywhere on a row-style or owner-column draft board."""
     if frame.empty:
         return set()
     found = set()
-    nonempty = frame.dropna(axis=1, how="all")
+    chosen = [column for column in columns if column in frame.columns]
+    if not chosen:
+        return set()
+    nonempty = frame[chosen].dropna(axis=1, how="all")
     for column in nonempty.columns:
         values = nonempty[column].dropna().astype(str)
         found.update(name for name in values.map(recognized_player) if name)
@@ -218,7 +235,10 @@ with st.sidebar:
             st.session_state.sheet_url = clean_url
             st.session_state.sheet_tab = clean_tab
             st.session_state.sheet_player_col = None
+            st.session_state.drafted_columns = []
+            st.session_state.drafted_columns_initialized = False
             load_sheet.clear()
+            all_drafted_players.clear()
             st.success(f"Draft source changed to: {clean_tab}")
             st.rerun()
     st.caption(f"Active tab: **{st.session_state.sheet_tab}**")
@@ -252,7 +272,13 @@ try:
     sheet_df = load_sheet(st.session_state.sheet_url, st.session_state.sheet_tab)
 except Exception as exc:
     sheet_error = exc
-board_drafted_names = all_drafted_players(sheet_df)
+valid_saved_columns = [column for column in st.session_state.drafted_columns if column in sheet_df.columns]
+if not st.session_state.drafted_columns_initialized:
+    st.session_state.drafted_columns = suggested_drafted_columns(sheet_df, st.session_state.roster_size)
+    st.session_state.drafted_columns_initialized = True
+elif valid_saved_columns != st.session_state.drafted_columns:
+    st.session_state.drafted_columns = valid_saved_columns
+board_drafted_names = all_drafted_players(sheet_df, tuple(st.session_state.drafted_columns))
 owned_names = {str(x.get("player", "")) for x in st.session_state.wins if x.get("player")}
 known_drafted_names = board_drafted_names | owned_names
 known_drafted_keys = {normalize(name) for name in known_drafted_names}
@@ -389,6 +415,21 @@ with tab_sheet:
         st.success(f"Live feed connected · {len(sheet_df)} rows")
         st.dataframe(sheet_df, use_container_width=True, hide_index=True, height=420)
         if len(sheet_df.columns):
+            column_counts = player_counts_by_column(sheet_df)
+            st.multiselect(
+                "Columns containing drafted rosters",
+                list(sheet_df.columns),
+                key="drafted_columns",
+                help="Only players found in these columns count as drafted. Exclude rankings, watch lists, and reference columns.",
+            )
+            selected_board_count = len(all_drafted_players(sheet_df, tuple(st.session_state.drafted_columns)))
+            if st.session_state.drafted_columns:
+                selected_summary = ", ".join(
+                    f"{column} ({column_counts.get(column, 0)})" for column in st.session_state.drafted_columns
+                )
+                st.caption(f"Drafted roster columns: {selected_summary} · {selected_board_count} unique players removed.")
+            else:
+                st.warning("No drafted-roster columns are selected, so sheet players are not being removed from availability.")
             detected_col = detect_player_column(sheet_df)
             saved_col = st.session_state.sheet_player_col
             default_col = saved_col if saved_col in sheet_df.columns else detected_col
@@ -399,7 +440,7 @@ with tab_sheet:
                 index=default_index,
                 help="Choose your team column for roster importing. Best Available scans the entire draft board.",
             )
-            board_count = len(all_drafted_players(sheet_df))
+            board_count = selected_board_count
             my_count = sheet_df[st.session_state.sheet_player_col].map(recognized_player).notna().sum()
             st.caption(f"{board_count} drafted players recognized across the board · {my_count} in the selected roster column.")
             with st.expander("Import my purchases from this tab"):
@@ -446,10 +487,11 @@ with tab_best:
     elif sheet_df.empty:
         st.warning("No live draft rows were loaded. Availability currently uses only purchases recorded in My roster.")
     else:
-        st.caption(f"Scanning all columns in **{st.session_state.sheet_tab}** · {len(drafted_names)} drafted players removed")
+        st.caption(f"Scanning {len(st.session_state.drafted_columns)} drafted-roster columns in **{st.session_state.sheet_tab}** · {len(drafted_names)} drafted players removed")
 
     if available.empty:
-        st.error("No available ranked players remain after applying the draft sheet and avoid list.")
+        st.error("Every ranked player is currently being marked unavailable.")
+        st.info("Open Draft Monitor and remove rankings, watch-list, or reference columns from **Columns containing drafted rosters**.")
     else:
         best_overall = available.iloc[0]
         qbs_owned = sum(base_position(x.get("position_rank", "")) == "QB" for x in st.session_state.wins)

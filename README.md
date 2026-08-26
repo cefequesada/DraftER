@@ -35,7 +35,7 @@ Share the spreadsheet with the service-account `client_email`.
 
 - Use the **Commissioner console** for natural-language questions such as “Trevor Lawrence is at $20. Should I bid?” It supports close spellings and omitted suffixes, resolves the player, returns only the next legal $1 bid, shows the maximum, and calculates the budget impact.
 - Availability questions are checked against every recognized player on the active draft sheet before any bid is recommended. Drafted players return **UNAVAILABLE**.
-- Whole-sheet availability uses a cached indexed scan, so auto-refresh does not block the main interface while checking the draft board.
+- Availability uses a cached indexed scan of the selected **Columns containing drafted rosters**, so rankings/reference columns do not incorrectly remove every player. The app suggests roster-like columns automatically, and the selection remains editable in Draft Monitor.
 - Confirm the roster template in **League setup** before relying on full-budget optimization.
 - Search and select a nominated player, then enter the current bid. The recommendation always returns only the next legal $1 bid.
 - Record wins from the recommendation card or manually in **My roster**.
